@@ -282,15 +282,32 @@ def main(
                 new_fingerprint=str(random.getrandbits(128)),
                 desc="Finding clusters...",
             )
+            ds.save_to_disk(io_args.output + "_before_filter")
+
             # This is where the deduplication happens
-            # Since there is no easy groupby in datasets
-            # I will use this simple filter for now
-            final_data = ds.filter(
-                function=lambda record: record[CLUSTER_COLUMN] == record[INDEX_COLUMN],
-                with_indices=False,
-                num_proc=io_args.num_proc,
-                desc="Filtering clusters...",
-            )
+            # Filtering by selecting the element with min index within each cluster
+            def filter_fn_idxmin(x):
+                return x.loc[[x[INDEX_COLUMN].idxmin()]]
+
+            # Filtering by `keep` key
+            def filter_fn_keep_key(x):
+                if "__keep__" in x and any(x["__keep__"]):
+                    return x.loc[x["__keep__"] == True]
+                else:
+                    return filter_fn_idxmin(x)
+
+            logger.info(f"Grouping by cluster...")
+            df = ds.to_pandas().groupby(CLUSTER_COLUMN)
+
+            logger.info(f"Filtering by keep key...")
+            from pandarallel import pandarallel
+            # pandarallel.initialize(progress_bar=True)
+            pandarallel.initialize()
+            df = df.parallel_apply(filter_fn_keep_key).reset_index(drop=True)
+            logger.info(f"Converting back to dataset...")
+            final_data = datasets.Dataset.from_pandas(df)
+            # df = df.apply(filter_fn_keep_key, include_groups=False)
+            # final_data = datasets.Dataset.from_pandas(df)
 
         with timer("Saving"):
             final_data = final_data.remove_columns([CLUSTER_COLUMN, INDEX_COLUMN])
