@@ -285,25 +285,61 @@ def main(
             ds.save_to_disk(io_args.output + "_before_filter")
 
             # This is where the deduplication happens
-            # Filtering by selecting the element with min index within each cluster
-            def filter_fn_idxmin(x):
-                return x.loc[[x[INDEX_COLUMN].idxmin()]]
+            PRIORITY_COLUMN = "__minhash_priority__"
+            KEEP_COLUMN = "__keep__"
+            def filter_fn_minhash_priority(x):
+                if PRIORITY_COLUMN in x:
+                    for priority in x[PRIORITY_COLUMN]:
+                        assert isinstance(priority, (int, float, bool, np.int64)), f"{PRIORITY_COLUMN} should be an int, float, bool or np.int64 type. Got {priority} instead."
+                if KEEP_COLUMN in x:
+                    for keep in x[KEEP_COLUMN]:
+                        assert isinstance(keep, bool), f"{KEEP_COLUMN} should be a bool. Got {keep} instead."
 
-            # Filtering by `keep` key
-            def filter_fn_keep_key(x):
-                if "__keep__" in x and any(x["__keep__"]):
-                    return x.loc[x["__keep__"] == True]
+                if PRIORITY_COLUMN in x and KEEP_COLUMN in x:
+                    # Leave those `KEEP_COLUMN == True` or have highest PRIORITY_COLUMN
+                    out = x.loc[x[KEEP_COLUMN] | (x.index == x[PRIORITY_COLUMN].idxmax())].copy()
+                    out["drop_num"] = (len(x) - len(out)) / len(out)
+                    out["drop_reason"] = "low_priority_and_not_keep"
+                    return out
+                elif PRIORITY_COLUMN in x:
+                    # Leave those highest PRIORITY_COLUMN
+                    out = x.loc[x.index == x[PRIORITY_COLUMN].idxmax()].copy()
+                    out["drop_num"] = (len(x) - len(out)) / len(out)
+                    out["drop_reason"] = "low_priority"
+                    return out
+                elif KEEP_COLUMN in x:
+                    # Leave those `KEEP_COLUMN == True` is has. Else leave the first one
+                    if any(x[KEEP_COLUMN]):
+                        out = x.loc[x[KEEP_COLUMN]].copy()
+                        out["drop_num"] = (len(x) - len(out)) / len(out)
+                        out["drop_reason"] = "duplicate_with_keep_rows"
+                        return out
+                    else:
+                        out = x.loc[[x[INDEX_COLUMN].idxmin()]].copy()
+                        out["drop_num"] = (len(x) - len(out)) / len(out)
+                        out["drop_reason"] = "duplicate_with_non_keep_rows"
+                        return out
                 else:
-                    return filter_fn_idxmin(x)
+                    # Leave the first one
+                    out["drop_num"] = (len(x) - len(out)) / len(out)
+                    out["drop_reason"] = "duplicate_and_index_latter"
+                    return out
 
             logger.info(f"Grouping by cluster...")
-            df = ds.to_pandas().groupby(CLUSTER_COLUMN)
+            df = ds.to_pandas()
+            df["drop_num"] = 0
+            df["drop_reason"] = None
+            df = df.groupby(CLUSTER_COLUMN)
 
             logger.info(f"Filtering by keep key...")
             from pandarallel import pandarallel
             # pandarallel.initialize(progress_bar=True)
             pandarallel.initialize()
-            df = df.parallel_apply(filter_fn_keep_key).reset_index(drop=True)
+            df = df.parallel_apply(filter_fn_minhash_priority).reset_index(drop=True)
+            for drop_reason in df["drop_reason"].unique():
+                logger.info(f'Drop because: {drop_reason} ({df[df["drop_reason"] == drop_reason]["drop_num"].sum()})')
+            df = df.drop(columns=["drop_num", "drop_reason"])
+
             logger.info(f"Converting back to dataset...")
             final_data = datasets.Dataset.from_pandas(df)
             # df = df.apply(filter_fn_keep_key, include_groups=False)
