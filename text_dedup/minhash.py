@@ -321,6 +321,7 @@ def main(
                         return out
                 else:
                     # Leave the first one
+                    out = x.loc[[x[INDEX_COLUMN].idxmin()]].copy()
                     out["drop_num"] = (len(x) - len(out)) / len(out)
                     out["drop_reason"] = "duplicate_and_index_latter"
                     return out
